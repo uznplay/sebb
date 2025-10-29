@@ -4,7 +4,7 @@
   "description": "Forward proxy with HTTPS interception to inject SEB headers",
   "main": "proxy-mitm.js",
   "scripts": {
-    "start": "node index.js.js",
+    "start": "node index.js",
     "setup": "node setup-certificates.js",
     "dev": "nodemon proxy-mitm.js",
     "test": "node test-proxy.js"
@@ -20,5 +20,6 @@
     "nodemon": "^3.0.1"
   }
 }
+
 
 
