@@ -14,7 +14,7 @@ const path = require('path');
 
 // Configuration
 const CONFIG = {
-  PORT: process.env.PORT || 8080,
+  parseInt(process.env.PORT) || 8080,  
   PORT_RETRY_MAX: 10,
   HEADERS: {
     'x-safeexambrowser-configkeyhash': '0321cacbe2e73700407a53ffe4018f79145351086b26791e69cf7563c6657899',
