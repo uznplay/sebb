@@ -1,6 +1,7 @@
 /**
  * MITM Proxy Server với SSL Interception
  * Inject headers vào cả HTTP và HTTPS requests
+ * WITH /cert route for certificate download
  */
 
 const http = require('http');
@@ -13,8 +14,8 @@ const path = require('path');
 
 // Configuration
 const CONFIG = {
-  PORT: 8080,
-  PORT_RETRY_MAX: 10, // Try ports 8080-8089
+  PORT: process.env.PORT || 8080,
+  PORT_RETRY_MAX: 10,
   HEADERS: {
     'x-safeexambrowser-configkeyhash': '0321cacbe2e73700407a53ffe4018f79145351086b26791e69cf7563c6657899',
     'x-safeexambrowser-requesthash': 'c3faee4ad084dfd87a1a017e0c75544c5e4824ff1f3ca4cdce0667ee82a5091a'
@@ -62,16 +63,12 @@ function loadCA() {
 
 // Generate certificate for domain
 function generateCertificate(hostname) {
-  // Check cache
   if (certCache.has(hostname)) {
     return certCache.get(hostname);
   }
   
   try {
-    // Generate key pair
     const keys = forge.pki.rsa.generateKeyPair(2048);
-    
-    // Create certificate
     const cert = forge.pki.createCertificate();
     cert.publicKey = keys.publicKey;
     cert.serialNumber = Math.floor(Math.random() * 100000).toString();
@@ -79,45 +76,25 @@ function generateCertificate(hostname) {
     cert.validity.notAfter = new Date();
     cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1);
     
-    const attrs = [{
-      name: 'commonName',
-      value: hostname
-    }];
-    
+    const attrs = [{ name: 'commonName', value: hostname }];
     cert.setSubject(attrs);
     cert.setIssuer(caCert.subject.attributes);
     
-    cert.setExtensions([{
-      name: 'basicConstraints',
-      cA: false
-    }, {
-      name: 'keyUsage',
-      digitalSignature: true,
-      keyEncipherment: true
-    }, {
-      name: 'extKeyUsage',
-      serverAuth: true,
-      clientAuth: true
-    }, {
-      name: 'subjectAltName',
-      altNames: [{
-        type: 2, // DNS
-        value: hostname
-      }]
-    }]);
+    cert.setExtensions([
+      { name: 'basicConstraints', cA: false },
+      { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
+      { name: 'extKeyUsage', serverAuth: true, clientAuth: true },
+      { name: 'subjectAltName', altNames: [{ type: 2, value: hostname }] }
+    ]);
     
-    // Sign with CA
     cert.sign(caKey, forge.md.sha256.create());
     
-    // Convert to PEM
     const pem = {
       privateKey: forge.pki.privateKeyToPem(keys.privateKey),
       certificate: forge.pki.certificateToPem(cert)
     };
     
-    // Cache
     certCache.set(hostname, pem);
-    
     return pem;
   } catch (err) {
     log('ERROR', `Failed to generate certificate for ${hostname}:`, err.message);
@@ -160,6 +137,26 @@ function injectHeaders(headers) {
 
 // Handle HTTP request
 function handleHttpRequest(req, res) {
+  // ===== SERVE CERTIFICATE AT /cert =====
+  if (req.url === '/cert' || req.url === '/certificate') {
+    if (fs.existsSync(CA_CERT_FILE)) {
+      const cert = fs.readFileSync(CA_CERT_FILE);
+      res.writeHead(200, {
+        'Content-Type': 'application/x-pem-file',
+        'Content-Disposition': 'attachment; filename="railway-seb-ca.pem"'
+      });
+      res.end(cert);
+      log('INFO', '📥 Certificate downloaded via /cert');
+      return;
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Certificate not found');
+      log('ERROR', 'Certificate file not found at /cert request');
+      return;
+    }
+  }
+  
+  // ===== REGULAR HTTP PROXY HANDLING =====
   stats.totalRequests++;
   stats.httpRequests++;
   
@@ -167,7 +164,6 @@ function handleHttpRequest(req, res) {
   
   log('INFO', `→ HTTP ${req.method} ${req.url}`);
   
-  // Inject headers
   const headers = injectHeaders(req.headers);
   delete headers['proxy-connection'];
   
@@ -181,7 +177,6 @@ function handleHttpRequest(req, res) {
   
   const proxyReq = http.request(options, (proxyRes) => {
     log('SUCCESS', `← ${proxyRes.statusCode} HTTP ${req.method} ${parsedUrl.hostname}`);
-    
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
   });
@@ -205,7 +200,6 @@ function handleHttpsConnect(req, clientSocket, head) {
   
   log('INFO', `→ HTTPS CONNECT ${hostname}:${port}`);
   
-  // Generate certificate for this hostname
   const cert = generateCertificate(hostname);
   
   if (!cert) {
@@ -213,23 +207,19 @@ function handleHttpsConnect(req, clientSocket, head) {
     return;
   }
   
-  // Create HTTPS server for this connection
   const serverOptions = {
     key: cert.privateKey,
     cert: cert.certificate
   };
   
-  // Tell client connection is established
   clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
   
-  // Create HTTPS server to intercept
   const httpsServer = https.createServer(serverOptions, (req, res) => {
     stats.totalRequests++;
     
     const targetUrl = `https://${hostname}${req.url}`;
     log('INFO', `→ HTTPS ${req.method} ${targetUrl}`);
     
-    // Inject headers!
     const headers = injectHeaders(req.headers);
     delete headers['proxy-connection'];
     
@@ -243,7 +233,6 @@ function handleHttpsConnect(req, clientSocket, head) {
     
     const proxyReq = https.request(options, (proxyRes) => {
       log('SUCCESS', `← ${proxyRes.statusCode} HTTPS ${req.method} ${hostname}${req.url}`);
-      
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
     });
@@ -264,10 +253,8 @@ function handleHttpsConnect(req, clientSocket, head) {
     clientSocket.end();
   });
   
-  // Pass the socket to HTTPS server
   httpsServer.emit('connection', clientSocket);
   
-  // Process initial data
   if (head && head.length > 0) {
     clientSocket.unshift(head);
   }
@@ -283,8 +270,6 @@ proxyServer.on('connect', handleHttpsConnect);
 function startServer(port, attempt = 0) {
   if (attempt >= CONFIG.PORT_RETRY_MAX) {
     console.error(`\x1b[31m✗ Failed to start server: All ports ${CONFIG.PORT}-${CONFIG.PORT + CONFIG.PORT_RETRY_MAX - 1} are in use\x1b[0m`);
-    console.error('');
-    console.error('Please run: \x1b[33mkill-port.bat\x1b[0m to free port 8080');
     process.exit(1);
     return;
   }
@@ -292,15 +277,14 @@ function startServer(port, attempt = 0) {
   const currentPort = port + attempt;
   
   proxyServer.listen(currentPort, () => {
-    CONFIG.PORT = currentPort; // Update actual port
+    CONFIG.PORT = currentPort;
     printBanner();
     
-    // Stats reporter
     setInterval(() => {
       if (stats.totalRequests > 0 && CONFIG.ENABLE_LOGGING) {
         log('INFO', `Stats: ${stats.totalRequests} total | ${stats.httpRequests} HTTP | ${stats.httpsRequests} HTTPS | ${stats.headersInjected} headers | ${stats.errors} errors`);
       }
-    }, 60000); // Every minute
+    }, 60000);
   });
   
   proxyServer.on('error', (err) => {
@@ -341,6 +325,9 @@ function printBanner() {
   console.log(`    \x1b[33m✓ HTTP:\x1b[0m  Host=127.0.0.1, Port=${CONFIG.PORT}`);
   console.log(`    \x1b[33m✓ HTTPS:\x1b[0m Host=127.0.0.1, Port=${CONFIG.PORT}`);
   console.log('');
+  console.log('  \x1b[32m📥 Download certificate:\x1b[0m');
+  console.log(`    \x1b[33mhttp://YOUR-RAILWAY-URL/cert\x1b[0m`);
+  console.log('');
   
   if (CONFIG.PORT !== 8080) {
     console.log(`  \x1b[33m⚠ NOTE: Using port ${CONFIG.PORT} instead of 8080\x1b[0m`);
@@ -372,3 +359,4 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
+
