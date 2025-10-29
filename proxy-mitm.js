@@ -14,7 +14,7 @@ const path = require('path');
 
 // Configuration
 const CONFIG = {
-  PORT: parseInt(process.env.PORT) || 8080,  
+  PORT: parseInt(process.env.PORT) || 8080,
   PORT_RETRY_MAX: 10,
   HEADERS: {
     'x-safeexambrowser-configkeyhash': '0321cacbe2e73700407a53ffe4018f79145351086b26791e69cf7563c6657899',
@@ -159,6 +159,55 @@ function handleHttpRequest(req, res) {
   // ===== REGULAR HTTP PROXY HANDLING =====
   stats.totalRequests++;
   stats.httpRequests++;
+  
+  // Handle relative URLs (browser directly accessing proxy)
+  if (!req.url.startsWith('http://') && !req.url.startsWith('https://')) {
+    log('WARN', `Invalid proxy request: ${req.url}`);
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SEB Proxy Server</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    h1 { color: #333; }
+    .info { background: #f0f0f0; padding: 15px; border-radius: 5px; margin: 20px 0; }
+    .error { background: #ffe0e0; padding: 15px; border-radius: 5px; margin: 20px 0; }
+    code { background: #e0e0e0; padding: 2px 5px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>🔒 SEB MITM Proxy Server</h1>
+  
+  <div class="error">
+    <strong>❌ Invalid Request</strong><br>
+    This is a forward proxy server, not a web server.
+  </div>
+  
+  <div class="info">
+    <strong>📥 Download Certificate:</strong><br>
+    <a href="/cert">Click here to download CA certificate</a>
+  </div>
+  
+  <div class="info">
+    <strong>⚙️ Configuration:</strong><br>
+    Configure your browser/SEB to use this as a proxy:<br>
+    <code>Host: ${req.headers.host || 'proxy-server'}</code><br>
+    <code>Port: ${CONFIG.PORT}</code>
+  </div>
+  
+  <div class="info">
+    <strong>📊 Stats:</strong><br>
+    Total Requests: ${stats.totalRequests}<br>
+    HTTP: ${stats.httpRequests} | HTTPS: ${stats.httpsRequests}
+  </div>
+</body>
+</html>
+    `);
+    return;
+  }
   
   const parsedUrl = new URL(req.url);
   
